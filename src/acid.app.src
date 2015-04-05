@@ -1,0 +1,11 @@
+{application, acid, 
+	[{description, "ACID Tracer and Logger Utility"},
+  	 {vsn, "0.0.1"},
+  	 {modules, [acid_app,acid_sup,acid_api,acid_tcp_sup,
+acid_tcp_socket,acid_tcp_acceptor]},	
+  	 {registered,[acid_sup,acid_tcp_sup]},
+  	 {applications, [kernel, stdlib]},
+  	 {mod, {acid_app,[]}},
+  	 {start_phases, []}
+ ]}.
+ 
