@@ -145,7 +145,7 @@ handle_info({tcp, Socket, Data},#tcp_sock_st{node = NodeName,file_handler = FH,d
 		StripData = unpack_tpkt(Data),
 		{ok,TcpFile} = file_handle(FH,StripData,NodeName),
 		{ok,TcpDB} = db_handle(DBH,StripData,NodeName),
-		{noreply,State#tcp_sock_st{file_handler = TcpFile,db_handler = DBH}}
+		{noreply,State#tcp_sock_st{file_handler = TcpFile,db_handler = TcpDB}}
 	catch
 		_:_ ->
 			lager:error("process message exception ~p",[erlang:get_stacktrace()]),
@@ -256,8 +256,10 @@ db_handle(TcpDB,_,_) -> {ok,TcpDB}.
 db_write_line(TcpDB,[],_) -> {ok,TcpDB};
 db_write_line(TcpDB,[L|R],NodeName) ->
 	case acid_api:write_db(TcpDB, L, NodeName) of
-		{ok,TcpDB1} -> db_write_line(TcpDB1,R,NodeName);
-		_ -> db_write_line(TcpDB,R,NodeName)
+		{ok,TcpDB1} ->
+			db_write_line(TcpDB1,R,NodeName);
+		_ ->
+			db_write_line(TcpDB,R,NodeName)
 	end.
 
 %% not need for sync, let os sync
@@ -265,17 +267,14 @@ file_sync(MyFile) ->
 	{ok,MyFile}.
 db_sync(#tcp_mysql_db{logbuf = LogB,relationbuf = RelationB,causebuf = CauseB} = MyDB) ->
 	if	size(LogB) > 0 ->
-			lager:debug("~p",[<<"INSERT INTO msslog(logtime,loglevel,node,pid,modname,msg) VALUES ",LogB/binary>>]),
 			emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO msslog(logtime,loglevel,node,pid,modname,msg) VALUES ",LogB/binary>>);
 		true -> ok
 	end,
 	if size(RelationB) > 0 ->
-		   lager:debug("~p",[<<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) VALUES ",RelationB/binary>>]),
 		   emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) VALUES ",RelationB/binary>>);
 	   true -> ok
 	end,
 	if size(CauseB) > 0 ->
-		   lager:debug("~p",[<<"INSERT INTO releasecause(pid,node,cause,cause_str,timestamp) VALUES ",CauseB/binary>>]),
 		   emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO releasecause(pid,node,cause,cause_str,timestamp) VALUES ",CauseB/binary>>);
 	   true -> ok
 	end,
