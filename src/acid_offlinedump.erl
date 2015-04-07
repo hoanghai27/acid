@@ -1,5 +1,4 @@
-%% @author Tran Hoan <hoantv3@viettel.com.vn>
-%% Copyright Softswitch Viettel  2012-2013. All Rights Reserved
+%% @author Tran Hoan <tvhoan88@gmail.com>
 %% Created on 1:30:09 PM Apr 2, 2015
 %% Purpose dump erlang log and aricent FEP, BEP, EM
 
@@ -13,7 +12,7 @@
 		 css7p_dump/3
 		]).
 
--compile([export_all]).
+-compile(export_all).
 
 %% get default 30 days ago
 get_ftp_log(HostInfo,Pid) -> get_ftp_log(HostInfo,Pid,{day,30}).
@@ -248,7 +247,7 @@ month2num("Nov") -> 11;
 month2num("Dec") -> 12.
 cyear({{CY,_,_},_}) -> CY.
 dt_now() -> 
-	[DT] = calendar: local_time_to_universal_time_dst(calendar:local_time()),
+	[DT] = calendar:local_time_to_universal_time_dst(calendar:local_time()),
 	DT.
 
 is_dump(Fn) ->

@@ -7,8 +7,11 @@
 -module(acid_api).
 
 -include("acid.hrl").
+-include_lib("kernel/include/file.hrl").
 
--export([process/4]).
+-export([write_db/3,
+		 write_logfile/2
+		]).
 
 -export([init_db/0,
 		 set_cause/2,
@@ -19,9 +22,7 @@
 		 set_ftpinfo/4,
 		 get_ftpinfo/2,
 		 del_ftpinfo/2,
-		 connect_logger_db/1,
-		 dump_offline/1,
-		 dump_offline/2
+		 connect_logger_db/1
 ]).
 
 -compile(export_all).
@@ -67,6 +68,88 @@ get_cause(K,Default) ->
 	end.
 set_config(acid_mapping_cause,V) -> [set_cause(K1, V1) || {K1,V1} <- V];
 set_config(K,V) -> ets:insert(?ACID_CONFIG_DB,{K,V}).
+%% =============================================================
+%%	copy from lager_util
+%% =============================================================
+get_tcp_fn(NodeName) ->
+	[{{Y,M,D},{H,Mi,S}}] = calendar:local_time_to_universal_time_dst(calendar:local_time()),
+	DateStr = lists:flatten(io_lib:format("~4.10.0B-~2.10.0B-~2.10.0B",[Y,M,D])),
+	TimeStr = lists:flatten(io_lib:format("~2.10.0B.~2.10.0B.~2.10.0B",[H,Mi,S])),
+	acid_api:get_config(acid_log_stickdir) ++ "/" ++ NodeName ++ "_" ++ DateStr ++ "_" ++ TimeStr ++ ".log".
+
+rotate_logfile(#tcp_file{fd = FD} = MyFile) -> 
+	%% delayed write can cause file:close not to do a close
+	_ = file:close(FD),
+	_ = file:close(FD),
+	open_logfile(MyFile).
+
+write_logfile(#tcp_file{fd = FD,rsize = RotSize} = MyFile,Msg) ->
+	Timestamp = os:timestamp(),
+	LastCheck = timer:now_diff(Timestamp,MyFile#tcp_file.last_check) div 1000,
+	case LastCheck >= MyFile#tcp_file.check_interval orelse FD == undefined of
+		true ->
+			case ensure_logfile(MyFile) of
+				{ok,#tcp_file{size = Size} = MyFile1} when RotSize /= 0, Size > RotSize ->
+					case rotate_logfile(MyFile1) of
+						{ok,MyFile2} ->
+							write_logfile(MyFile2#tcp_file{last_check = Timestamp},Msg);
+						_ ->
+							lager:error("failed to rotate log file ~p",[MyFile1#tcp_file.fname]),
+							{ok,MyFile1#tcp_file{last_check = Timestamp}}
+					end;
+				{ok,MyFile1} ->
+					_ = file:write(FD,Msg),
+					_ = file:write(FD,<<"\r\n">>),
+					{ok,MyFile1#tcp_file{last_check = Timestamp}};
+				{error,Reason} ->
+					lager:error("failed to reopen log file ~p",[Reason]),
+					{ok,MyFile#tcp_file{last_check = Timestamp}}
+			end;
+		false ->
+			_ = file:write(FD,Msg),
+			_ = file:write(FD,<<"\r\n">>),
+			{ok,MyFile}
+	
+	end.
+
+open_logfile(#tcp_file{sync_size = Size,sync_interval = Interval,nodename = NodeName} = MyFile) ->
+	Name = get_tcp_fn(NodeName),
+	TimeStamp = os:timestamp(),
+    case filelib:ensure_dir(Name) of
+        ok ->
+            Options = [append, raw] ++  [{delayed_write, Size, Interval}],
+            case file:open(Name, Options) of
+                {ok, FD} ->
+                    case file:read_file_info(Name) of
+                        {ok, FInfo} ->
+                            Inode = FInfo#file_info.inode,
+                            {ok, MyFile#tcp_file{fd = FD,fname = Name,inode = Inode,last_check = TimeStamp,size = FInfo#file_info.size}};
+                        X -> X
+                    end;
+                Y -> Y
+            end;
+        Z -> Z
+    end.
+
+ensure_logfile(#tcp_file{fd = FD,inode = Inode,fname = Name} = MyFile) ->
+    case file:read_file_info(Name) of
+        {ok, FInfo} ->
+            Inode2 = FInfo#file_info.inode,
+            case Inode == Inode2 of
+                true ->
+                    {ok,MyFile#tcp_file{size = FInfo#file_info.size}};
+                false ->
+                    %% delayed write can cause file:close not to do a close
+                    _ = file:close(FD),
+                    _ = file:close(FD),
+                    open_logfile(MyFile)
+            end;
+        _ ->
+            %% delayed write can cause file:close not to do a close
+            _ = file:close(FD),
+            _ = file:close(FD),
+            open_logfile(MyFile)
+    end.
 
 connect_logger_db(mysql) ->
 	Host = acid_api:get_config(acid_db_server),
@@ -81,119 +164,198 @@ connect_logger_db(mysql) ->
 		Exp -> {error,Exp}
 	end.
 
-dump_offline(Fn) -> dump_offline(Fn,false).
-dump_offline(Fn,Overwrite) ->
-	%% create db connection
-	connect_logger_db(get_config(acid_db_type,mysql)),
-	SQL = <<"SELECT startwrite,endwrite FROM offlinelog">>,
-	emysql:execute(?ACID_LOGGER_POOL,SQL).
-
-process(logger,_Db,_Msg,undefined) ->
-	%% log startup
-	ok;
-process(logger,Db,Msg,NodeName) ->
-	Lines = binary:split(Msg, ?BIN_DELIM,[global]),
-	[procces_log_line(X,Db,NodeName) || X <- Lines],
-	ok.
-
-procces_log_line(Line,Db,NodeName) ->
+write_db(MyDB,Line,NodeName) ->
 	case binary:split(Line,<<$#>>,[global]) of
 		[Date,Level,NodePid,MF,Contents] ->
-			insert_db(Db,NodeName,Date,Level,NodePid,MF,Contents);
+			insert_db(MyDB,NodeName,Date,Level,NodePid,MF,Contents);
 		[Date,Level,NodePid,MF|Data] ->
 			Contents = iolist_to_binary(Data),
-			insert_db(Db,NodeName,Date,Level,NodePid,MF,Contents);
+			insert_db(MyDB,NodeName,Date,Level,NodePid,MF,Contents);
 		_ ->
 			%% invalid log
-			insert_db(Db,NodeName,<<"">>,<<"">>,<<"">>,<<"">>,Line)
+			insert_db(MyDB,NodeName,<<"">>,<<"">>,<<"">>,<<"">>,Line)
 	end.
-
 -define(RL_SPAWN,<<"1">>).
 -define(RL_RSPAWN,<<"2">>).
 -define(RL_CHILD,<<"3">>).
 -define(RL_HASID,<<"110">>).
 
-insert_db(mysql,NodeName,Date,Level,NodePid,MF,Contents) ->
+insert_db(#tcp_mysql_db{bulk_size = BulkSize} = MyDB,
+		  NodeName,Date,Level,NodePid,MF,Contents) ->
 	Pid = case binary:split(NodePid,<<$:>>) of
 			  [_,P] ->
 				  P;
 			  _ ->
-				  <<"">>
+				 NodePid
 		  end,
 %% 	{Mod,Fun} = case binary:split(NodePid,<<":">>,[global]) of
 %% 					[M,F,_] -> {M,F};
 %% 					[M,F] -> {M,F};
 %% 					_ -> {<<"NULL">>,<<"NULL">>}
 %% 				end,
-	SQL = <<"INSERT INTO msslog(logtime,loglevel,node,pid,modname,msg) values('",Date/binary,$',$,,$',
-			Level/binary,$',$,,$',NodeName/binary,$',$,,$',Pid/binary,$',$,,$',MF/binary,$',$,,$',Contents/binary,$',$)>>,
-	emysql:execute(?ACID_LOGGER_POOL,SQL),
+	if
+		size(MyDB#tcp_mysql_db.logbuf) == 0 ->
+			LogB = <<"('",Date/binary,$',$,,$',Level/binary,$',$,,$',NodeName/binary,$',
+					 $,,$',Pid/binary,$',$,,$',MF/binary,$',$,,$',Contents/binary,$',$)>>,
+			LogR = 1;
+		true ->
+			LogB = <<(MyDB#tcp_mysql_db.logbuf)/binary,",('",Date/binary,$',$,,$',Level/binary,$',$,,$',
+					  NodeName/binary,$',$,,$',Pid/binary,$',$,,$',MF/binary,$',$,,$',Contents/binary,$',$)>>,
+			LogR = MyDB#tcp_mysql_db.bulk_log + 1
+	end,
+	if
+		LogR >= BulkSize ->
+			emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO msslog(logtime,loglevel,node,pid,modname,msg) VALUES ",LogB/binary>>),
+			NLogB = <<>>,
+			NLogR = 0;
+		true ->
+			NLogB = LogB,
+			NLogR = LogR
+	end,
 %%  process log contents
 	case Contents of
 		<<"SPAWN:",_/binary>> ->
 			case binary:split(Contents,<<$:>>, [global]) of
 				[<<"SPAWN">>,Pid1,Pid2] ->
-					MetaSQL = <<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) values('",
-								Pid1/binary,$',$,,$',Pid2/binary,$',$,,?RL_SPAWN/binary,$,,$',Date/binary,"','",NodeName/binary,"','',FALSE)">>,
-%% 					lager:debug("MetaSQL = ~p",[MetaSQL]),
-					emysql:execute(?ACID_LOGGER_POOL,MetaSQL);
+					if
+						size(MyDB#tcp_mysql_db.relationbuf) == 0 ->
+							RelationB = <<"('",Pid1/binary,$',$,,$',Pid2/binary,$',$,,?RL_SPAWN/binary,$,,$',
+										  Date/binary,"','",NodeName/binary,"','',FALSE)">>,
+							RelationR = 1;
+						true ->
+							RelationB = <<(MyDB#tcp_mysql_db.relationbuf)/binary,",('",Pid1/binary,$',$,,$',Pid2/binary,
+										  $',$,,?RL_SPAWN/binary,$,,$',Date/binary,"','",NodeName/binary,"','',FALSE)">>,
+							RelationR = MyDB#tcp_mysql_db.bulk_relation + 1
+					end,
+					if
+						RelationR > BulkSize ->
+							emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) VALUES ",RelationB/binary>>),
+							NRelationR = 0,
+							NRelationB = <<>>;
+						true ->
+							NRelationR = RelationR,
+							NRelationB = RelationB
+					end,
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR,relationbuf = NRelationB,bulk_relation = NRelationR}};
 				_ ->
 					%% invalid log
-					ok
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR}}
 			end;
 		<<"RSPAWN:",_/binary>> ->
 			case binary:split(Contents,<<$:>>, [global]) of
 				[<<"RSPAWN">>,Node1,Pid1,Node2,Pid2] ->
 					P1 = normalize_pid(Pid1),
 					P2 = normalize_pid(Pid2),
-					MetaSQL = <<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) values('",
-								P1/binary,$',$,,$',P2/binary,$',$,,?RL_RSPAWN/binary,$,,$',Date/binary,$',$,,
-								Node1/binary,$,,Node2/binary,",TRUE)">>,
-%% 					lager:debug("MetaSQL = ~p",[MetaSQL]),
-					emysql:execute(?ACID_LOGGER_POOL,MetaSQL);
+					if
+						size(MyDB#tcp_mysql_db.relationbuf) == 0 ->
+							RelationB = <<"('",P1/binary,$',$,,$',P2/binary,$',$,,?RL_RSPAWN/binary,$,,$',
+										  Date/binary,$',$,,Node1/binary,$,,Node2/binary,",TRUE)">>,
+							RelationR = 1;
+						true ->
+							RelationB = <<(MyDB#tcp_mysql_db.relationbuf)/binary,",('",P1/binary,$',$,,$',P2/binary,
+										  $',$,,?RL_RSPAWN/binary,$,,$',Date/binary,$',$,,Node1/binary,$,,Node2/binary,",TRUE)">>,
+							RelationR = MyDB#tcp_mysql_db.bulk_relation + 1
+					end,
+					if
+						RelationR > BulkSize ->
+							emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) VALUES ",RelationB/binary>>),
+							NRelationR = 0,
+							NRelationB = <<>>;
+						true ->
+							NRelationR = RelationR,
+							NRelationB = RelationB
+					end,
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR,relationbuf = NRelationB,bulk_relation = NRelationR}};
 				_ ->
 					%% invalid log
-					ok
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR}}
 			end;
 		<<"HASID:",_/binary>> ->
 			case binary:split(Contents,<<$:>>, [global]) of
 				[<<"HASID">>,Pid,RawId] ->
 					Id = normalize_id(RawId),
-					MetaSQL = <<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) values('",
-								Pid/binary,$',$,,$',Id/binary,$',$,,?RL_HASID/binary,$,,$',Date/binary,"','",NodeName/binary,"','',FALSE)">>,
-%% 					lager:debug("MetaSQL = ~p",[MetaSQL]),
-					emysql:execute(?ACID_LOGGER_POOL,MetaSQL);
+					if
+						size(MyDB#tcp_mysql_db.relationbuf) == 0 ->
+							RelationB = <<"('",Pid/binary,$',$,,$',Id/binary,$',$,,?RL_HASID/binary,$,,$',Date/binary,
+										  "','",NodeName/binary,"','',FALSE)">>,
+							RelationR = 1;
+						true ->
+							RelationB = <<(MyDB#tcp_mysql_db.relationbuf)/binary,",('",Pid/binary,$',$,,$',Id/binary,$',$,,?RL_HASID/binary,$,,$',
+										  Date/binary,"','",NodeName/binary,"','',FALSE)">>,
+							RelationR = MyDB#tcp_mysql_db.bulk_relation + 1
+					end,
+					if
+						RelationR > BulkSize ->
+							emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) VALUES ",RelationB/binary>>),
+							NRelationR = 0,
+							NRelationB = <<>>;
+						true ->
+							NRelationR = RelationR,
+							NRelationB = RelationB
+					end,
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR,relationbuf = NRelationB,bulk_relation = NRelationR}};
 				_ ->
 					%% invalid log
-					ok
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR}}
 			end;
 		<<"TERMINATED:",_/binary>> ->
 			case binary:split(Contents,<<$:>>, [global]) of
 				[<<"TERMINATED">>,Reason|_] ->
 					Cause = normalize_cause(Reason),
-					MetaSQL = <<"INSERT INTO releasecause(pid,node,cause,cause_str,timestamp) values('",
-								Pid/binary,$',$,,$',NodeName/binary,$',$,,Cause/binary,$,,
-								$',Reason/binary,$',$,,$',Date/binary,"')">>,
-%% 					lager:debug("MetaSQL = ~p",[MetaSQL]),
-					emysql:execute(?ACID_LOGGER_POOL,MetaSQL);
+					if
+						size(MyDB#tcp_mysql_db.causebuf) == 0 ->
+							CauseB = <<"('",Pid/binary,$',$,,$',NodeName/binary,$',$,,Cause/binary,
+									   $,,$',Reason/binary,$',$,,$',Date/binary,"')">>,
+							CauseR = 1;
+						true ->
+							CauseB = <<(MyDB#tcp_mysql_db.causebuf)/binary,",('",Pid/binary,$',$,,$',NodeName/binary,
+									   $',$,,Cause/binary,$,,$',Reason/binary,$',$,,$',Date/binary,"')">>,
+							CauseR = MyDB#tcp_mysql_db.bulk_cause + 1
+					end,
+					if
+						CauseR >= BulkSize ->
+							emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO releasecause(pid,node,cause,cause_str,timestamp) VALUES ",CauseB/binary>>),
+							NCauseB = <<>>,
+							NCauseR = 0;
+						true ->
+							NCauseB = CauseB,
+							NCauseR = CauseR
+					end,
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR,causebuf = NCauseB,bulk_cause = NCauseR}};
 				_ ->
 					%% invalid log
-					ok
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR}}
 			end;
 		<<"FL_START:",_/binary>> ->
 			case binary:split(Contents,<<$:>>, [global]) of 
 				[<<"FL_START">>,Pid,ID,FL] ->
-					MetaSQL = <<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) values('",
-								Pid/binary,$',$,,$',ID/binary,$',$,,FL/binary,$,,$',Date/binary,"','",NodeName/binary,"','',FALSE)">>,
-%% 					lager:debug("MetaSQL = ~p",[MetaSQL]),
-					emysql:execute(?ACID_LOGGER_POOL,MetaSQL);
+					if
+						size(MyDB#tcp_mysql_db.relationbuf) == 0 ->
+							RelationB = <<"('",Pid/binary,$',$,,$',ID/binary,$',$,,FL/binary,$,,$',Date/binary,
+										  "','",NodeName/binary,"','',FALSE)">>,
+							RelationR = 1;
+						true ->
+							RelationB = <<(MyDB#tcp_mysql_db.relationbuf)/binary,",('",Pid/binary,$',$,,$',ID/binary,$',$,,FL/binary,$,,$',
+										  Date/binary,"','",NodeName/binary,"','',FALSE)">>,
+							RelationR = MyDB#tcp_mysql_db.bulk_relation + 1
+					end,
+					if
+						RelationR > BulkSize ->
+							emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO relationlog(id1,id2,relation,timestamp,node1,node2,remote) VALUES ",RelationB/binary>>),
+							NRelationR = 0,
+							NRelationB = <<>>;
+						true ->
+							NRelationR = RelationR,
+							NRelationB = RelationB
+					end,
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR,relationbuf = NRelationB,bulk_relation = NRelationR}};
 				_ ->
 					%% invalid log
-					ok
+					{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR}}
 			end;
 		_ ->
 			%% normal log
-			ok
+			{ok,MyDB#tcp_mysql_db{logbuf = NLogB,bulk_log = NLogR}}
 	end.
 
 normalize_pid(Pid) ->

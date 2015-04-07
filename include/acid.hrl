@@ -18,4 +18,28 @@
 	mtime	:: tuple()		%% Last modify time
 }).
 
+-record(tcp_mysql_db,{
+	bulk_size		::	integer(),		%% Bulk insert size
+	bulk_log = 0	:: integer(),		%% Bulk number of msslog record
+	bulk_cause = 0		:: integer(),	%% Bulk number of cause record
+	bulk_relation = 0	:: integer(),	%% Bulk number of relation record
+	logbuf	= <<>>	::	binary(),
+	causebuf = <<>>	::	binary(),
+	relationbuf = <<>>	:: binary() 
+}).
+
+-record(tcp_file,{
+	fd					::	port(),			%% File descriptor
+	size	= 0			::	integer(),		%% Current file size
+	rsize	= 0			::	integer(),		%% File size for rotating
+	date				::	string(),		%% Perodic for rolling
+	sync_size = 65536	::	integer(),		%% File size for delaying write
+	sync_interval = 5000::	timeout(),		%% Sync interval for delaying write
+	inode 				::	integer(),		%% current inode
+	check_interval = 2000	:: timeout(),	%% Check interval for rotate
+	last_check = os:timestamp() :: erlang:timestamp(),
+	nodename 			::	string(),		%% Node name
+	fname				::	string()		%% Filename
+}).
+
 -endif.

@@ -1,5 +1,4 @@
-%% @author Tran Hoan <hoantv3@viettel.com.vn>
-%% Copyright Softswitch Viettel  2012-2013. All Rights Reserved
+%% @author Tran Hoan <tvhoan88@gmail.com>
 %% Created on 2:54:01 PM Apr 3, 2015
 %% Purpose
 
