@@ -328,7 +328,8 @@ insert_db(#tcp_mysql_db{bulk_size = BulkSize} = MyDB,
 			end;
 		<<"FL_START:",_/binary>> ->
 			case binary:split(Contents,<<$:>>, [global]) of 
-				[<<"FL_START">>,Pid,ID,FL] ->
+				[<<"FL_START">>,Pid,RawId,FL] ->
+					ID = normalize_id(RawId),
 					if
 						size(MyDB#tcp_mysql_db.relationbuf) == 0 ->
 							RelationB = <<"('",Pid/binary,$',$,,$',ID/binary,$',$,,FL/binary,$,,$',Date/binary,
@@ -376,22 +377,38 @@ normalize_cause(Reason) ->
 		{I,_} -> binary:encode_unsigned(I)
 	end.
 
-normalize_id(RawId) ->
+normalize_id(Raw) ->
+	RawId = strip_raw(Raw),
 	case binary:split(RawId,<<$,>>,[global]) of
 		[Id] -> Id;
 		Ids ->
-			bcd2str(Ids,<<>>,RawId)
+			bcd2str(Ids,<<$">>,RawId)
 	end.
 
-bcd2str([],In,_Def) -> In;
+bcd2str([],In,_Def) -> <<In/binary,$">>;
 bcd2str([Dec|Rem],In,Def) ->
 	case string:to_integer(binary_to_list(Dec)) of
 		{error,_} -> Def;
 		{I,_} ->
-			A = (I bsr 4) + $0,
-			B = (I band 15) + $0,
+			I1 = (I bsr 4),
+			I2 = (I band 15),
+			if
+				I1 > 9 ->
+					A = I1 - 10 + $A;
+				true ->
+					A = I1 + $0
+  			end,
+			if
+				I2 > 9 ->
+					B = I2 + $A - 10;
+				true ->
+					B = I2 + $0
+			end,
 			bcd2str(Rem,<<In/binary,B,A>>,Def)
 	end.
+strip_raw(<<$<,$<,R/binary>>) -> R;
+strip_raw(<<$[,R/binary>>) -> R;
+strip_raw(R) -> R.
 
 name2type("LOGS_EM" ++ _) ->
 	nexgen_em;
