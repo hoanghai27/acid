@@ -378,12 +378,39 @@ normalize_cause(Reason) ->
 	end.
 
 normalize_id(Raw) ->
-	RawId = strip_raw(Raw),
-	case binary:split(RawId,<<$,>>,[global]) of
-		[Id] -> Id;
-		Ids ->
-			bcd2str(Ids,<<$">>,RawId)
+%% 	lager:debug("Id = ~p",[Raw]),
+	{FL,RawId} = strip_raw(Raw),
+	case {FL,binary:split(RawId,<<$,>>,[global])} of
+		{false,[Id]} -> Id;
+		{true,[Id]} ->
+			case Id of
+				[F|_] when F >= $0 andalso F =< 9 ->
+					bcd2str([Id],<<$">>,Raw);
+				_ ->
+					Id1 = binary_to_list(binary:part(Id,1,size(Id) - 3)),
+					lbcd2str(Id1, <<$">>, Raw)
+			end;
+		{true,Ids} ->
+			bcd2str(Ids,<<$">>,Raw)
 	end.
+
+lbcd2str([],In,_Def) -> <<In/binary,$">>;
+lbcd2str([I|T],In,Def) ->
+	I1 = (I bsr 4),
+	I2 = (I band 15),
+	if
+		I1 > 9 ->
+			A = I1 - 10 + $A;
+		true ->
+			A = I1 + $0
+	end,
+	if
+		I2 > 9 ->
+			B = I2 + $A - 10;
+		true ->
+			B = I2 + $0
+	end,
+	lbcd2str(T,<<In/binary,B,A>>,Def).
 
 bcd2str([],In,_Def) -> <<In/binary,$">>;
 bcd2str([Dec|Rem],In,Def) ->
@@ -406,9 +433,16 @@ bcd2str([Dec|Rem],In,Def) ->
 			end,
 			bcd2str(Rem,<<In/binary,B,A>>,Def)
 	end.
-strip_raw(<<$<,$<,R/binary>>) -> R;
-strip_raw(<<$[,R/binary>>) -> R;
-strip_raw(R) -> R.
+strip_raw(<<$<,$<,R/binary>>) -> {true,R};
+strip_raw(<<$[,R/binary>>) -> {true,R};
+strip_raw(<<${,R/binary>>) ->
+	case binary:match(R,<<$<,$<>>) of
+  		{Pos,L} ->
+			{true,binary:part(R,Pos + L,size(R) - Pos - L - 1)};
+		_ ->
+			{true,R}
+	end;
+strip_raw(R) -> {false,R}.
 
 name2type("LOGS_EM" ++ _) ->
 	nexgen_em;
