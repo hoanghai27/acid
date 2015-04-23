@@ -7,6 +7,7 @@
 -module(acid_api).
 
 -include("acid.hrl").
+-include_lib("Emysql/include/emysql.hrl").
 -include_lib("kernel/include/file.hrl").
 
 -export([write_db/3,
@@ -181,7 +182,7 @@ write_db(MyDB,Line,NodeName) ->
 -define(RL_HASID,<<"110">>).
 
 insert_db(#tcp_mysql_db{bulk_size = BulkSize} = MyDB,
-		  NodeName,Date,Level,NodePid,MF,Contents) ->
+		  NodeName,Date,Level,NodePid,MF1,Contents) ->
 	Pid = case binary:split(NodePid,<<$:>>) of
 			  [_,P] ->
 				  P;
@@ -193,19 +194,38 @@ insert_db(#tcp_mysql_db{bulk_size = BulkSize} = MyDB,
 %% 					[M,F] -> {M,F};
 %% 					_ -> {<<"NULL">>,<<"NULL">>}
 %% 				end,
+	MF = case MF1 of
+			 <<"CRASH",_/binary>> -> <<"error_logger">>;
+			 <<"Supervisor",_/binary>> -> <<"error_logger">>;
+			 <<"Application",_/binary>> -> <<"error_logger">>;
+			 <<"global",_/binary>> -> <<"error_logger">>;
+			 _ when size(MF1) > ?ACID_MAX_MOD_NAME -> <<"error_logger">>;
+			 _ ->
+				 MF1
+		 end,
+	EsContents = escape_data(Contents),
 	if
 		size(MyDB#tcp_mysql_db.logbuf) == 0 ->
 			LogB = <<"('",Date/binary,$',$,,$',Level/binary,$',$,,$',NodeName/binary,$',
-					 $,,$',Pid/binary,$',$,,$',MF/binary,$',$,,$',Contents/binary,$',$)>>,
+					 $,,$',Pid/binary,$',$,,$',MF/binary,$',$,,$',EsContents/binary,$',$)>>,
 			LogR = 1;
 		true ->
 			LogB = <<(MyDB#tcp_mysql_db.logbuf)/binary,",('",Date/binary,$',$,,$',Level/binary,$',$,,$',
-					  NodeName/binary,$',$,,$',Pid/binary,$',$,,$',MF/binary,$',$,,$',Contents/binary,$',$)>>,
+					  NodeName/binary,$',$,,$',Pid/binary,$',$,,$',MF/binary,$',$,,$',EsContents/binary,$',$)>>,
 			LogR = MyDB#tcp_mysql_db.bulk_log + 1
 	end,
 	if
 		LogR >= BulkSize ->
-			emysql:execute(?ACID_LOGGER_POOL,<<"INSERT INTO msslog(logtime,loglevel,node,pid,modname,msg) VALUES ",LogB/binary>>),
+			LSQL = <<"INSERT INTO msslog(logtime,loglevel,node,pid,modname,msg) VALUES ",LogB/binary>>,
+			Ret = emysql:execute(?ACID_LOGGER_POOL,LSQL),
+			case Ret of
+				#error_packet{} ->
+					io:format("LSQL size = ~p~n",[size(LSQL)]),
+					print_big(LSQL),
+					io:format("RETURN => ~p~n",[Ret]);
+				_ ->
+					ok
+			end,
 			NLogB = <<>>,
 			NLogR = 0;
 		true ->
@@ -458,6 +478,23 @@ name2type("rsm" ++ _) ->
 	rsm;
 name2type(_) ->
 	em.
+
+escape_data(A) ->
+	A1 = if
+			 size(A) > ?ACID_MAX_LOG_SIZE -> binary:part(A,?ACID_MAX_LOG_SIZE);
+			 true -> A
+		 end,
+	binary:replace(A1,<<"\'">>,<<"\\'">>, [global]).
+
+print_big(Msg) ->
+	print_big_part("START =>",Msg),
+	io:format("END~n").
+
+print_big_part(Fm,Msg) when size(Msg) < 200 ->
+	io:format("~p~p",[Fm,Msg]);
+print_big_part(Fm,<<Msg:200/binary,Rem/binary>>) ->
+	io:format("~p~p",[Fm,Msg]),
+	print_big_part("NEXT_PART",Rem).
 
 %% example message <<"2015-03-03 15:37:52.038#debug#mss1@10.61.64.31:<0.2170.0>#cs_gsmSSF:terminate:1449#>>
 

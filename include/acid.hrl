@@ -11,6 +11,8 @@
 -define(ACID_TRACER_POOL,acid_tracer_pool).
 -define(ACID_LOGGER_POOL_SIZE,5).
 -define(BIN_DELIM,<<0,0>>).
+-define(ACID_MAX_LOG_SIZE,10240).
+-define(ACID_MAX_MOD_NAME,128).
 
 -record(acid_ftp_info,{
 	id 		:: string(),	%% Host:Port:Filename
